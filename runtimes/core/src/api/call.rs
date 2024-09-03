@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context;
+use http::Uri;
 use serde::de::DeserializeOwned;
+use tokio::net::TcpStream;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 use encore::runtime::v1 as pb;
@@ -136,6 +139,49 @@ impl ServiceRegistry {
         result
     }
 
+    pub async fn connect_stream(
+        &self,
+        endpoint_name: &EndpointName,
+        data: JSONPayload,
+        source: Option<&model::Request>,
+    ) -> APIResult<super::websocket::Socket> {
+        let call = model::APICall {
+            source,
+            target: endpoint_name,
+        };
+        let start_event_id = self.tracer.rpc_call_start(&call);
+
+        let result = self
+            .do_connect_stream(endpoint_name, data, source, start_event_id)
+            .await;
+
+        if let Some(start_event_id) = start_event_id {
+            self.tracer
+                .rpc_call_end(&call, start_event_id, result.as_ref().err());
+        }
+
+        let websocket = result?;
+
+        let Some(endpoint) = self.endpoints.get(endpoint_name) else {
+            return Err(api::Error {
+                code: api::ErrCode::NotFound,
+                message: "endpoint not found".into(),
+                internal_message: Some(format!(
+                    "endpoint {} not found in application metadata",
+                    endpoint_name
+                )),
+                stack: None,
+            });
+        };
+
+        let req_schema = endpoint.request[0].clone();
+        let resp_schema = endpoint.response.clone();
+
+        let socket = super::websocket::Socket::new_tungstenite(websocket, req_schema, resp_schema);
+
+        Ok(socket)
+    }
+
     async fn do_api_call(
         &self,
         endpoint_name: &EndpointName,
@@ -220,6 +266,99 @@ impl ServiceRegistry {
             Ok(resp) => parse_api_response(resp).await,
             Err(e) => Err(api::Error::internal(e)),
         }
+    }
+
+    async fn do_connect_stream(
+        &self,
+        endpoint_name: &EndpointName,
+        mut data: JSONPayload,
+        source: Option<&model::Request>,
+        start_event_id: Option<TraceEventId>,
+    ) -> APIResult<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        let base_url = self
+            .base_urls
+            .get(endpoint_name.service())
+            .ok_or_else(|| api::Error {
+                code: api::ErrCode::NotFound,
+                message: "service not found".into(),
+                internal_message: Some(format!(
+                    "no service discovery configuration found for service {}",
+                    endpoint_name.service()
+                )),
+                stack: None,
+            })?;
+
+        let Some(endpoint) = self.endpoints.get(endpoint_name) else {
+            return Err(api::Error {
+                code: api::ErrCode::NotFound,
+                message: "endpoint not found".into(),
+                internal_message: Some(format!(
+                    "endpoint {} not found in application metadata",
+                    endpoint_name
+                )),
+                stack: None,
+            });
+        };
+
+        let req_schema = &endpoint.request[0];
+        let req_path = req_schema.path.to_request_path(&mut data)?;
+        let req_url = format!("{}{}", base_url, req_path);
+        let req_url = Url::parse(&req_url).map_err(|_| api::Error {
+            code: api::ErrCode::Internal,
+            message: "failed to build endpoint url".into(),
+            internal_message: Some(format!(
+                "failed to build endpoint url for endpoint {}",
+                endpoint_name
+            )),
+            stack: None,
+        })?;
+
+        let mut reqwest_req = self
+            .http_client
+            .request(http::Method::GET, req_url)
+            .build()
+            .map_err(api::Error::internal)?;
+
+        if let Some(qry) = &req_schema.query {
+            qry.to_outgoing_request(&mut data, &mut reqwest_req)?;
+        }
+        if let Some(hdr) = &req_schema.header {
+            hdr.to_outgoing_request(&mut data, &mut reqwest_req)?;
+        }
+
+        // Add call metadata.
+        let headers = reqwest_req.headers_mut();
+        self.propagate_call_meta(headers, endpoint, source, start_event_id)
+            .map_err(api::Error::internal)?;
+
+        let mut req = http::Request::builder().method(http::Method::GET);
+        for (key, value) in headers {
+            req = req.header(key.to_owned(), value.to_owned());
+        }
+
+        let req = req.uri(Uri::try_from(reqwest_req.url().to_string()).unwrap());
+        let req = req.body(()).map_err(|_| api::Error {
+            code: api::ErrCode::Internal,
+            message: "failed to build endpoint url".into(),
+            internal_message: Some(format!(
+                "failed to build endpoint url for endpoint {}",
+                endpoint_name
+            )),
+            stack: None,
+        })?;
+
+        let (stream, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .map_err(|_| api::Error {
+                code: api::ErrCode::Internal,
+                message: "failed to create connect request".into(),
+                internal_message: Some(format!(
+                    "failed creating connect request for endpoint {endpoint_name}"
+                )),
+                stack: None,
+            })?;
+
+        Ok(stream)
     }
 
     fn propagate_call_meta(

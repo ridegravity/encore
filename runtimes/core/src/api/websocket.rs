@@ -2,11 +2,15 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 use axum::extract::ws::{Message, WebSocket};
-use futures::Future;
-use tokio::sync::{
-    mpsc::{self, UnboundedReceiver, UnboundedSender},
-    watch,
+use futures::{Future, SinkExt, StreamExt};
+use tokio::{
+    net::TcpStream,
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        watch,
+    },
 };
+use tokio_tungstenite::{tungstenite, MaybeTlsStream, WebSocketStream};
 
 use crate::model::{self, Request, RequestData};
 
@@ -111,16 +115,83 @@ pub struct Socket {
     shutdown: watch::Sender<bool>,
 }
 
-fn get_message_payload(msg: &Message) -> Option<&[u8]> {
-    match msg {
-        Message::Text(text) => Some(text.as_bytes()),
-        Message::Binary(data) => Some(data),
-        // these message types are handled by axum
-        Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
-    }
-}
-
 impl Socket {
+    pub(crate) fn new_tungstenite(
+        mut websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+        incoming: Arc<schema::Request>,
+        outgoing: Arc<schema::Response>,
+    ) -> Self {
+        let (shutdown, mut shutdown_watch) = watch::channel(false);
+
+        let (outgoing_message_tx, mut outgoing_messages_rx) = mpsc::unbounded_channel();
+        let (incoming_messages_tx, incoming_message_rx) = mpsc::unbounded_channel();
+
+        let schema = SocketSchema { incoming, outgoing };
+        tokio::spawn({
+            async move {
+                loop {
+                    tokio::select! {
+                        msg = websocket.next() => match msg {
+                            None => {
+                                log::trace!("websocket closed");
+                                break
+                            },
+                            Some(Ok(msg)) => {
+                                if let Err(e) = Socket::handle_incoming_message(
+                                    &schema,
+                                    &incoming_messages_tx,
+                                    msg,
+                                )
+                                .await
+                                {
+                                    log::warn!("failed handling incoming message: {e}");
+                                    break;
+                                }
+                            },
+                            Some(Err(e)) => {
+                                log::debug!("websocket receive failed: {e}");
+                                break;
+                            }
+                        },
+                        msg = outgoing_messages_rx.recv() => {
+                            match msg {
+                                None => {
+                                    _ = websocket.close(None).await;
+                                    log::trace!("websocket closed");
+                                    break;
+                                }
+                                Some(msg) => {
+                                    let msg = Socket::handle_outgoing_message(&schema, msg);
+                                    match msg {
+                                        Ok(msg) => {
+                                            if let Err(e) = websocket.send(tungstenite::Message::Text(msg)).await {
+                                                log::debug!("failed to send message to socket: {e}")
+                                            }
+                                        }
+                                        Err(e) => log::warn!("failed to send message to socket: {e}"),
+                                    }
+                                }
+                            }
+                        },
+                        _ = shutdown_watch.changed() => {
+                            // gracefully shutdown, wait for all messages to be read on out channel
+                            // before closing the websocket
+                            outgoing_messages_rx.close();
+                        }
+                    }
+                }
+
+                log::trace!("socket closed");
+            }
+        });
+
+        Socket {
+            outgoing_message_tx,
+            incoming_message_rx: tokio::sync::Mutex::new(incoming_message_rx),
+            shutdown,
+        }
+    }
+
     fn new(
         mut websocket: WebSocket,
         incoming: Arc<schema::Request>,
@@ -166,8 +237,15 @@ impl Socket {
                                     break;
                                 }
                                 Some(msg) => {
-                                    Socket::handle_outgoing_message(&schema, &mut websocket, msg)
-                                        .await
+                                    let msg = Socket::handle_outgoing_message(&schema, msg);
+                                    match msg {
+                                        Ok(msg) => {
+                                            if let Err(e) = websocket.send(Message::Text(msg)).await {
+                                                log::debug!("failed to send message to socket: {e}")
+                                            }
+                                        }
+                                        Err(e) => log::warn!("failed to send message to socket: {e}"),
+                                    }
                                 }
                             }
                         },
@@ -216,31 +294,24 @@ impl Socket {
         (sink, stream)
     }
 
-    async fn handle_outgoing_message(
+    fn handle_outgoing_message(
         schema: &SocketSchema,
-        websocket: &mut WebSocket,
         msg: serde_json::Map<String, serde_json::Value>,
-    ) {
-        let msg = schema
+    ) -> APIResult<String> {
+        schema
             .to_outgoing_message(msg)
-            .and_then(|msg| String::from_utf8(msg).map_err(super::Error::internal));
-
-        match msg {
-            Ok(msg) => {
-                if let Err(e) = websocket.send(Message::Text(msg)).await {
-                    log::debug!("failed to send message to socket: {e}")
-                }
-            }
-            Err(e) => log::warn!("failed to send message to socket: {e}"),
-        }
+            .and_then(|msg| String::from_utf8(msg).map_err(super::Error::internal))
     }
 
-    async fn handle_incoming_message(
+    async fn handle_incoming_message<M>(
         schema: &SocketSchema,
         incoming: &UnboundedSender<serde_json::Map<String, serde_json::Value>>,
-        msg: Message,
-    ) -> anyhow::Result<()> {
-        if let Some(data) = get_message_payload(&msg) {
+        msg: M,
+    ) -> anyhow::Result<()>
+    where
+        M: MessagePayload,
+    {
+        if let Some(data) = msg.payload() {
             match schema.parse_incoming_message(data).await {
                 Ok(msg) => {
                     if let Err(e) = incoming.send(msg) {
@@ -254,6 +325,34 @@ impl Socket {
         Ok(())
     }
 }
+
+trait MessagePayload {
+    fn payload(&self) -> Option<&[u8]>;
+}
+
+impl MessagePayload for axum::extract::ws::Message {
+    fn payload(&self) -> Option<&[u8]> {
+        match self {
+            Message::Text(text) => Some(text.as_bytes()),
+            Message::Binary(data) => Some(data),
+            // these message types are handled by axum
+            Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
+        }
+    }
+}
+impl MessagePayload for tungstenite::Message {
+    fn payload(&self) -> Option<&[u8]> {
+        match self {
+            tungstenite::Message::Text(text) => Some(text.as_bytes()),
+            tungstenite::Message::Binary(data) => Some(data),
+            tungstenite::Message::Ping(_) => None,
+            tungstenite::Message::Pong(_) => None,
+            tungstenite::Message::Close(_) => None,
+            tungstenite::Message::Frame(_) => None,
+        }
+    }
+}
+
 pub struct Sink {
     tx: UnboundedSender<serde_json::Map<String, serde_json::Value>>,
     shutdown: watch::Sender<bool>,

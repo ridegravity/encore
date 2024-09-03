@@ -61,14 +61,14 @@ pub fn new_handler(env: Env, func: JsFunction) -> napi::Result<Arc<dyn api::Boxe
 }
 
 #[napi]
-struct Socket {
+pub struct Socket {
     #[allow(dead_code)]
     inner: api::websocket::Socket,
 }
 
 #[napi]
 impl Socket {
-    fn new(inner: api::websocket::Socket) -> Self {
+    pub fn new(inner: api::websocket::Socket) -> Self {
         Socket { inner }
     }
 

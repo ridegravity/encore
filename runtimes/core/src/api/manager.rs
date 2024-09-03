@@ -315,6 +315,16 @@ impl Manager {
         self.service_registry.api_call(endpoint_name, data, source)
     }
 
+    pub fn stream<'a>(
+        &'a self,
+        endpoint_name: &'a EndpointName,
+        data: JSONPayload,
+        source: Option<&'a model::Request>,
+    ) -> impl Future<Output = APIResult<super::websocket::Socket>> + 'a {
+        self.service_registry
+            .connect_stream(endpoint_name, data, source)
+    }
+
     /// Starts serving the API.
     pub fn start_serving(&self) -> tokio::task::JoinHandle<anyhow::Result<()>> {
         let api = self.api_server.as_ref().map(|srv| srv.router());

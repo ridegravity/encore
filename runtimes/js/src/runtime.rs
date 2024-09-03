@@ -1,10 +1,10 @@
 use crate::api::{new_api_handler, APIRoute, Request};
 use crate::gateway::{Gateway, GatewayConfig};
 use crate::log::Logger;
-use crate::meta;
 use crate::pubsub::{PubSubSubscription, PubSubSubscriptionConfig, PubSubTopic};
 use crate::secret::Secret;
 use crate::sqldb::SQLDatabase;
+use crate::{meta, websocket_api};
 use encore_runtime_core::api::schema::JSONPayload;
 use encore_runtime_core::pubsub::SubName;
 use encore_runtime_core::EncoreName;
@@ -188,6 +188,31 @@ impl Runtime {
                     format!("failed to make api call: {:?}", e),
                 )
             })
+    }
+
+    #[napi]
+    pub async fn stream(
+        &self,
+        service: String,
+        endpoint: String,
+        data: JSONPayload,
+        source: Option<&Request>,
+    ) -> napi::Result<websocket_api::Socket> {
+        let endpoint = encore_runtime_core::EndpointName::new(service, endpoint);
+        let source = source.map(|s| s.inner.as_ref());
+        let socket = self
+            .runtime
+            .api()
+            .stream(&endpoint, data, source)
+            .await
+            .map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("failed to make api call: {:?}", e),
+                )
+            })?;
+
+        Ok(websocket_api::Socket::new(socket))
     }
 
     /// Returns the version of the Encore runtime being used
