@@ -275,6 +275,7 @@ impl ServiceRegistry {
         source: Option<&model::Request>,
         start_event_id: Option<TraceEventId>,
     ) -> APIResult<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+        log::error!("########### => {data:?}");
         let base_url = self
             .base_urls
             .get(endpoint_name.service())
@@ -302,6 +303,8 @@ impl ServiceRegistry {
 
         let req_schema = &endpoint.request[0];
         let req_path = req_schema.path.to_request_path(&mut data)?;
+        let base_url = base_url.replace("http://", "ws://");
+        let base_url = base_url.replace("https://", "wss://");
         let req_url = format!("{}{}", base_url, req_path);
         let req_url = Url::parse(&req_url).map_err(|_| api::Error {
             code: api::ErrCode::Internal,
@@ -331,13 +334,21 @@ impl ServiceRegistry {
         self.propagate_call_meta(headers, endpoint, source, start_event_id)
             .map_err(api::Error::internal)?;
 
-        let mut req = http::Request::builder().method(http::Method::GET);
+        let mut req = http::Request::builder()
+            .method(http::Method::GET)
+            .header("sec-websocket-protocol", "encore-ws")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("sec-websocket-version", "13")
+            .header("host", "example.com:8000")
+            .header("upgrade", "websocket")
+            .header("connection", "Upgrade");
+
         for (key, value) in headers {
             req = req.header(key.to_owned(), value.to_owned());
         }
 
         let req = req.uri(Uri::try_from(reqwest_req.url().to_string()).unwrap());
-        let req = req.body(()).map_err(|_| api::Error {
+        let req = dbg!(req.body(()).map_err(|_| api::Error {
             code: api::ErrCode::Internal,
             message: "failed to build endpoint url".into(),
             internal_message: Some(format!(
@@ -345,18 +356,22 @@ impl ServiceRegistry {
                 endpoint_name
             )),
             stack: None,
-        })?;
+        })?);
 
-        let (stream, _) = tokio_tungstenite::connect_async(req)
-            .await
-            .map_err(|_| api::Error {
+        let (stream, resp) = tokio_tungstenite::connect_async(req).await.map_err(|err| {
+            ::log::warn!("error: {err:?}");
+
+            api::Error {
                 code: api::ErrCode::Internal,
                 message: "failed to create connect request".into(),
                 internal_message: Some(format!(
-                    "failed creating connect request for endpoint {endpoint_name}"
+                    "failed creating connect request for endpoint {endpoint_name}: error => {err:?}"
                 )),
                 stack: None,
-            })?;
+            }
+        })?;
+
+        dbg!(resp);
 
         Ok(stream)
     }

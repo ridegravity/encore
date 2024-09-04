@@ -1,1 +1,2 @@
-export {apiCall} from "../api/mod";
+export { apiCall, stream } from "../api/mod";
+
