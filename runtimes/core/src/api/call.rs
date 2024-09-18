@@ -341,7 +341,7 @@ impl ServiceRegistry {
             .header("sec-websocket-version", "13")
             .header("host", "example.com:8000")
             .header("upgrade", "websocket")
-            .header("connection", "Upgrade");
+            .header("connection", "upgrade");
 
         for (key, value) in headers {
             req = req.header(key.to_owned(), value.to_owned());
