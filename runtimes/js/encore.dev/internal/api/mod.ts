@@ -15,6 +15,26 @@ export async function stream(
   data: any
 ): Promise<any> {
   const source = getCurrentRequest();
-  return runtime.RT.stream(service, endpoint, data, source);
-}
+  const stream = await runtime.RT.stream(service, endpoint, data, source);
 
+  return {
+    async send(msg: any) {
+      stream.send(msg);
+    },
+    async recv() {
+      stream.recv();
+    },
+    async close() {
+      stream.close();
+    },
+    async *[Symbol.asyncIterator]() {
+      while (true) {
+        try {
+          yield await stream.recv();
+        } catch (e) {
+          break;
+        }
+      }
+    }
+  };
+}
