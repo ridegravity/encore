@@ -313,10 +313,12 @@ impl ServiceRegistry {
         };
 
         let req_path = req_schema.path.to_request_path(&mut data)?;
-        let base_url = base_url.replace("http://", "ws://");
-        let base_url = base_url.replace("https://", "wss://");
-        let req_url = format!("{}{}", base_url, req_path);
-        let req_url = Url::parse(&req_url).map_err(|_| api::Error {
+
+        let base_url = base_url
+            .replace("http://", "ws://")
+            .replace("https://", "wss://");
+
+        let req_url = Url::parse(&format!("{}{}", base_url, req_path)).map_err(|_| api::Error {
             code: api::ErrCode::Internal,
             message: "failed to build endpoint url".into(),
             internal_message: Some(format!(
@@ -328,7 +330,7 @@ impl ServiceRegistry {
 
         let mut req = req_url
             .into_client_request()
-            .map_err(|e| api::Error::invalid_argument("Unable to create request", e))?;
+            .map_err(|e| api::Error::invalid_argument("unable to create request", e))?;
 
         if let Some(qry) = &req_schema.query {
             qry.to_outgoing_request(&mut data, &mut req)?;
@@ -341,18 +343,17 @@ impl ServiceRegistry {
         self.propagate_call_meta(req.headers_mut(), endpoint, source, start_event_id)
             .map_err(api::Error::internal)?;
 
-        let (stream, _resp) = tokio_tungstenite::connect_async(req).await.map_err(|err| {
-            ::log::warn!("error: {err:?}");
-
-            api::Error {
-                code: api::ErrCode::Internal,
-                message: "failed to create connect request".into(),
-                internal_message: Some(format!(
-                    "failed creating connect request for endpoint {endpoint_name}: error => {err:?}"
-                )),
-                stack: None,
-            }
-        })?;
+        let (stream, _resp) =
+            tokio_tungstenite::connect_async(req)
+                .await
+                .map_err(|err| api::Error {
+                    code: api::ErrCode::Internal,
+                    message: "failed to create connect request".into(),
+                    internal_message: Some(format!(
+                        "failed creating connect request for endpoint {endpoint_name}: {err}"
+                    )),
+                    stack: None,
+                })?;
 
         Ok(stream)
     }
