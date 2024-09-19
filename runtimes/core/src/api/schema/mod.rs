@@ -17,12 +17,8 @@ mod query;
 
 pub type JSONPayload = Option<serde_json::Map<String, serde_json::Value>>;
 
-pub trait ToOutgoingRequest {
-    fn to_outgoing_request(
-        &self,
-        payload: &mut JSONPayload,
-        req: &mut reqwest::Request,
-    ) -> APIResult<()>;
+pub trait ToOutgoingRequest<Request> {
+    fn to_outgoing_request(&self, payload: &mut JSONPayload, req: &mut Request) -> APIResult<()>;
 }
 
 pub trait ToResponse {

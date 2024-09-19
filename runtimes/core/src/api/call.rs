@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context;
-use http::Uri;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
@@ -275,7 +275,6 @@ impl ServiceRegistry {
         source: Option<&model::Request>,
         start_event_id: Option<TraceEventId>,
     ) -> APIResult<WebSocketStream<MaybeTlsStream<TcpStream>>> {
-        log::error!("########### => {data:?}");
         let base_url = self
             .base_urls
             .get(endpoint_name.service())
@@ -316,49 +315,22 @@ impl ServiceRegistry {
             stack: None,
         })?;
 
-        let mut reqwest_req = self
-            .http_client
-            .request(http::Method::GET, req_url)
-            .build()
-            .map_err(api::Error::internal)?;
+        let mut req = req_url
+            .into_client_request()
+            .map_err(|e| api::Error::invalid_argument("Unable to create request", e))?;
 
         if let Some(qry) = &req_schema.query {
-            qry.to_outgoing_request(&mut data, &mut reqwest_req)?;
-        }
-        if let Some(hdr) = &req_schema.header {
-            hdr.to_outgoing_request(&mut data, &mut reqwest_req)?;
+            qry.to_outgoing_request(&mut data, &mut req)?;
         }
 
-        // Add call metadata.
-        let headers = reqwest_req.headers_mut();
-        self.propagate_call_meta(headers, endpoint, source, start_event_id)
+        if let Some(hdr) = &req_schema.header {
+            hdr.to_outgoing_request(&mut data, &mut req)?;
+        }
+
+        self.propagate_call_meta(req.headers_mut(), endpoint, source, start_event_id)
             .map_err(api::Error::internal)?;
 
-        let mut req = http::Request::builder()
-            .method(http::Method::GET)
-            .header("sec-websocket-protocol", "encore-ws")
-            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-            .header("sec-websocket-version", "13")
-            .header("host", "example.com:8000")
-            .header("upgrade", "websocket")
-            .header("connection", "upgrade");
-
-        for (key, value) in headers {
-            req = req.header(key.to_owned(), value.to_owned());
-        }
-
-        let req = req.uri(Uri::try_from(reqwest_req.url().to_string()).unwrap());
-        let req = dbg!(req.body(()).map_err(|_| api::Error {
-            code: api::ErrCode::Internal,
-            message: "failed to build endpoint url".into(),
-            internal_message: Some(format!(
-                "failed to build endpoint url for endpoint {}",
-                endpoint_name
-            )),
-            stack: None,
-        })?);
-
-        let (stream, resp) = tokio_tungstenite::connect_async(req).await.map_err(|err| {
+        let (stream, _resp) = tokio_tungstenite::connect_async(req).await.map_err(|err| {
             ::log::warn!("error: {err:?}");
 
             api::Error {
@@ -370,8 +342,6 @@ impl ServiceRegistry {
                 stack: None,
             }
         })?;
-
-        dbg!(resp);
 
         Ok(stream)
     }
