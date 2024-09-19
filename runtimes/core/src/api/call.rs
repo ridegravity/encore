@@ -300,7 +300,18 @@ impl ServiceRegistry {
             });
         };
 
-        let req_schema = &endpoint.request[0];
+        let Some(req_schema) = &endpoint.handshake else {
+            return Err(api::Error {
+                code: api::ErrCode::NotFound,
+                message: "no handshake schema found".into(),
+                internal_message: Some(format!(
+                    "endpoint {} doesn't have a handshake schema specified",
+                    endpoint_name
+                )),
+                stack: None,
+            });
+        };
+
         let req_path = req_schema.path.to_request_path(&mut data)?;
         let base_url = base_url.replace("http://", "ws://");
         let base_url = base_url.replace("https://", "wss://");
