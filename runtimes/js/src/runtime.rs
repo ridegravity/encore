@@ -130,7 +130,12 @@ impl Runtime {
 
     #[napi]
     pub fn register_handler(&self, env: Env, route: APIRoute) -> napi::Result<()> {
-        let handler = new_api_handler(env, route.handler, route.raw, route.streaming)?;
+        let handler = new_api_handler(
+            env,
+            route.handler,
+            route.raw,
+            route.streaming_request || route.streaming_response,
+        )?;
 
         // If we're not hosting an API server, this is a no-op.
         let Some(srv) = self.runtime.api().server() else {
@@ -197,10 +202,10 @@ impl Runtime {
         endpoint: String,
         data: JSONPayload,
         source: Option<&Request>,
-    ) -> napi::Result<websocket_api::Socket> {
+    ) -> napi::Result<websocket_api::WebSocketClient> {
         let endpoint = encore_runtime_core::EndpointName::new(service, endpoint);
         let source = source.map(|s| s.inner.as_ref());
-        let socket = self
+        let client = self
             .runtime
             .api()
             .stream(&endpoint, data, source)
@@ -212,7 +217,7 @@ impl Runtime {
                 )
             })?;
 
-        Ok(websocket_api::Socket::new(socket))
+        Ok(websocket_api::WebSocketClient::new(client))
     }
 
     /// Returns the version of the Encore runtime being used

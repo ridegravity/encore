@@ -153,3 +153,30 @@ impl Response {
     //     self.header.to_response()
     // }
 }
+
+#[derive(Debug)]
+pub struct StreamMessage {
+    pub body: Option<Body>,
+}
+
+pub trait ToStreamMessage {
+    fn to_stream_message(&self) -> StreamMessage;
+}
+
+impl ToStreamMessage for Response {
+    fn to_stream_message(&self) -> StreamMessage {
+        StreamMessage {
+            body: self.body.clone(),
+        }
+    }
+}
+
+impl ToStreamMessage for Request {
+    fn to_stream_message(&self) -> StreamMessage {
+        if let RequestBody::Typed(body) = &self.body {
+            StreamMessage { body: body.clone() }
+        } else {
+            StreamMessage { body: None }
+        }
+    }
+}

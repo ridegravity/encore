@@ -5,9 +5,7 @@ use std::time::SystemTime;
 
 use anyhow::Context;
 use serde::de::DeserializeOwned;
-use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 use encore::runtime::v1 as pb;
@@ -23,6 +21,7 @@ use crate::trace::Tracer;
 use crate::{api, encore, model, secrets, EncoreName, Hosted};
 
 use super::reqauth::meta::MetaMapMut;
+use super::websocket_client::WebSocketClient;
 
 /// Tracks where services are located and how to call them.
 pub struct ServiceRegistry {
@@ -144,7 +143,7 @@ impl ServiceRegistry {
         endpoint_name: &EndpointName,
         data: JSONPayload,
         source: Option<&model::Request>,
-    ) -> APIResult<super::websocket::Socket> {
+    ) -> APIResult<WebSocketClient> {
         let call = model::APICall {
             source,
             target: endpoint_name,
@@ -160,9 +159,9 @@ impl ServiceRegistry {
                 .rpc_call_end(&call, start_event_id, result.as_ref().err());
         }
 
-        let websocket = result?;
+        let client = result?;
 
-        let Some(endpoint) = self.endpoints.get(endpoint_name) else {
+        let Some(_endpoint) = self.endpoints.get(endpoint_name) else {
             return Err(api::Error {
                 code: api::ErrCode::NotFound,
                 message: "endpoint not found".into(),
@@ -174,12 +173,18 @@ impl ServiceRegistry {
             });
         };
 
+        /*
         let req_schema = endpoint.request[0].clone();
         let resp_schema = endpoint.response.clone();
 
-        let socket = super::websocket::Socket::new_tungstenite(websocket, req_schema, resp_schema);
+        let socket = super::websocket::Socket::new_tungstenite(
+            client,
+            resp_schema.to_stream_message(),
+            req_schema.to_stream_message(),
+        );
 
-        Ok(socket)
+        Ok(socket)*/
+        Ok(client)
     }
 
     async fn do_api_call(
@@ -274,7 +279,7 @@ impl ServiceRegistry {
         mut data: JSONPayload,
         source: Option<&model::Request>,
         start_event_id: Option<TraceEventId>,
-    ) -> APIResult<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+    ) -> APIResult<WebSocketClient> {
         let base_url = self
             .base_urls
             .get(endpoint_name.service())
@@ -343,8 +348,14 @@ impl ServiceRegistry {
         self.propagate_call_meta(req.headers_mut(), endpoint, source, start_event_id)
             .map_err(api::Error::internal)?;
 
-        let (stream, _resp) =
-            tokio_tungstenite::connect_async(req)
+        let client = WebSocketClient::connect(req).await;
+
+        /*
+                let (stream, _resp) = tokio_tungstenite::connect_async_with_config(
+                    req,
+                    Some(WebSocketConfig::default()),
+                    false,
+                )
                 .await
                 .map_err(|err| api::Error {
                     code: api::ErrCode::Internal,
@@ -354,8 +365,8 @@ impl ServiceRegistry {
                     )),
                     stack: None,
                 })?;
-
-        Ok(stream)
+        */
+        Ok(client)
     }
 
     fn propagate_call_meta(

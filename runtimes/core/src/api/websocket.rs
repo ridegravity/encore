@@ -1,16 +1,14 @@
+use crate::api::schema::ToStreamMessage;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 use axum::extract::ws::{Message, WebSocket};
-use futures::{Future, SinkExt, StreamExt};
-use tokio::{
-    net::TcpStream,
-    sync::{
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
-        watch,
-    },
+use futures::Future;
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    watch,
 };
-use tokio_tungstenite::{tungstenite, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite;
 
 use crate::model::{self, Request, RequestData};
 
@@ -74,7 +72,11 @@ where
         .protocols(["encore-ws"])
         .on_failed_upgrade(|err| log::debug!("websocket upgrade failed: {err}"))
         .on_upgrade(move |ws| async move {
-            let socket = Socket::new(ws, req_schema, resp_schema);
+            let socket = Socket::new(
+                ws,
+                req_schema.to_stream_message(),
+                resp_schema.to_stream_message(),
+            );
 
             let payload = match direction {
                 model::StreamDirection::InOut => StreamMessagePayload::InOut(socket),
@@ -85,14 +87,15 @@ where
                         match rx.recv().await {
                             Some(resp) => match resp {
                                 Ok(Some(resp)) => {
+                                    log::warn!("RECEIVED response MESSAGE: {resp:?}");
                                     if sink.send(resp).is_err() {
-                                        log::debug!("sink channel closed");
+                                        log::warn!("sink channel closed");
                                     }
                                 }
                                 Ok(None) => log::warn!("responded with empty response"),
                                 Err(err) => log::warn!("responded with error: {err:?}"),
                             },
-                            None => log::debug!("response channel closed"),
+                            None => log::warn!("response channel closed"),
                         };
                     });
 
@@ -116,86 +119,10 @@ pub struct Socket {
 }
 
 impl Socket {
-    pub(crate) fn new_tungstenite(
-        mut websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
-        incoming: Arc<schema::Request>,
-        outgoing: Arc<schema::Response>,
-    ) -> Self {
-        let (shutdown, mut shutdown_watch) = watch::channel(false);
-
-        let (outgoing_message_tx, mut outgoing_messages_rx) = mpsc::unbounded_channel();
-        let (incoming_messages_tx, incoming_message_rx) = mpsc::unbounded_channel();
-
-        let schema = SocketSchema { incoming, outgoing };
-        tokio::spawn({
-            async move {
-                loop {
-                    tokio::select! {
-                        msg = websocket.next() => match msg {
-                            None => {
-                                log::trace!("websocket closed");
-                                break
-                            },
-                            Some(Ok(msg)) => {
-                                if let Err(e) = Socket::handle_incoming_message(
-                                    &schema,
-                                    &incoming_messages_tx,
-                                    msg,
-                                )
-                                .await
-                                {
-                                    log::warn!("failed handling incoming message: {e}");
-                                    break;
-                                }
-                            },
-                            Some(Err(e)) => {
-                                log::debug!("websocket receive failed: {e}");
-                                break;
-                            }
-                        },
-                        msg = outgoing_messages_rx.recv() => {
-                            match msg {
-                                None => {
-                                    _ = websocket.close(None).await;
-                                    log::trace!("websocket closed");
-                                    break;
-                                }
-                                Some(msg) => {
-                                    let msg = Socket::handle_outgoing_message(&schema, msg);
-                                    match msg {
-                                        Ok(msg) => {
-                                            if let Err(e) = websocket.send(tungstenite::Message::Text(msg)).await {
-                                                log::debug!("failed to send message to socket: {e}")
-                                            }
-                                        }
-                                        Err(e) => log::warn!("failed to send message to socket: {e}"),
-                                    }
-                                }
-                            }
-                        },
-                        _ = shutdown_watch.changed() => {
-                            // gracefully shutdown, wait for all messages to be read on out channel
-                            // before closing the websocket
-                            outgoing_messages_rx.close();
-                        }
-                    }
-                }
-
-                log::trace!("socket closed");
-            }
-        });
-
-        Socket {
-            outgoing_message_tx,
-            incoming_message_rx: tokio::sync::Mutex::new(incoming_message_rx),
-            shutdown,
-        }
-    }
-
     fn new(
         mut websocket: WebSocket,
-        incoming: Arc<schema::Request>,
-        outgoing: Arc<schema::Response>,
+        incoming: schema::StreamMessage,
+        outgoing: schema::StreamMessage,
     ) -> Self {
         let (shutdown, mut shutdown_watch) = watch::channel(false);
 
@@ -209,7 +136,7 @@ impl Socket {
                     tokio::select! {
                         msg = websocket.recv() => match msg {
                             None => {
-                                log::trace!("websocket closed");
+                                log::warn!("x websocket closed");
                                 break
                             },
                             Some(Ok(msg)) => {
@@ -220,12 +147,12 @@ impl Socket {
                                 )
                                 .await
                                 {
-                                    log::warn!("failed handling incoming message: {e}");
+                                    log::warn!("x failed handling incoming message: {e}");
                                     break;
                                 }
                             },
                             Some(Err(e)) => {
-                                log::debug!("websocket receive failed: {e}");
+                                log::warn!("x websocket receive failed: {e}");
                                 break;
                             }
                         },
@@ -233,7 +160,7 @@ impl Socket {
                             match msg {
                                 None => {
                                     _ = websocket.close().await;
-                                    log::trace!("websocket closed");
+                                    log::warn!("x websocket closed");
                                     break;
                                 }
                                 Some(msg) => {
@@ -241,10 +168,10 @@ impl Socket {
                                     match msg {
                                         Ok(msg) => {
                                             if let Err(e) = websocket.send(Message::Text(msg)).await {
-                                                log::debug!("failed to send message to socket: {e}")
+                                                log::warn!("x failed to send message to socket: {e}")
                                             }
                                         }
-                                        Err(e) => log::warn!("failed to send message to socket: {e}"),
+                                        Err(e) => log::warn!("x failed to send message to socket: {e}"),
                                     }
                                 }
                             }
@@ -257,7 +184,7 @@ impl Socket {
                     }
                 }
 
-                log::trace!("socket closed");
+                log::warn!("x socket closed");
             }
         });
 
@@ -278,6 +205,7 @@ impl Socket {
     }
 
     pub fn close(&self) {
+        log::warn!("socket.close was called");
         _ = self.shutdown.send(true);
     }
 
@@ -345,10 +273,10 @@ impl MessagePayload for tungstenite::Message {
         match self {
             tungstenite::Message::Text(text) => Some(text.as_bytes()),
             tungstenite::Message::Binary(data) => Some(data),
-            tungstenite::Message::Ping(_) => None,
-            tungstenite::Message::Pong(_) => None,
-            tungstenite::Message::Close(_) => None,
-            tungstenite::Message::Frame(_) => None,
+            tungstenite::Message::Ping(_)
+            | tungstenite::Message::Pong(_)
+            | tungstenite::Message::Close(_)
+            | tungstenite::Message::Frame(_) => None,
         }
     }
 }
@@ -365,6 +293,7 @@ impl Sink {
     }
 
     pub fn close(&self) {
+        log::warn!("sink.close was called");
         _ = self.shutdown.send(true);
     }
 }
@@ -379,8 +308,8 @@ impl Stream {
 }
 
 struct SocketSchema {
-    incoming: Arc<schema::Request>,
-    outgoing: Arc<schema::Response>,
+    incoming: schema::StreamMessage,
+    outgoing: schema::StreamMessage,
 }
 
 impl SocketSchema {
@@ -399,7 +328,7 @@ impl SocketSchema {
         &self,
         bytes: &[u8],
     ) -> APIResult<serde_json::Map<String, serde_json::Value>> {
-        let schema::RequestBody::Typed(Some(ref body)) = self.incoming.body else {
+        let Some(ref body) = self.incoming.body else {
             return Err(super::Error {
                 code: super::ErrCode::InvalidArgument,
                 message: "invalid streaming body type in schema".to_string(),
@@ -421,3 +350,86 @@ impl SocketSchema {
         Ok(value)
     }
 }
+
+/*
+pub(crate) fn new_tungstenite(
+    mut websocket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    incoming: schema::StreamMessage,
+    outgoing: schema::StreamMessage,
+) -> Self {
+    let (shutdown, mut shutdown_watch) = watch::channel(false);
+
+    let (outgoing_message_tx, mut outgoing_messages_rx) = mpsc::unbounded_channel();
+    let (incoming_messages_tx, incoming_message_rx) = mpsc::unbounded_channel();
+
+    let schema = SocketSchema { incoming, outgoing };
+    tokio::spawn({
+        async move {
+            loop {
+                tokio::select! {
+                    msg = websocket.next() => {
+                        log::warn!("client got message over websocket: {msg:?}");
+                        match msg {
+                            None => {
+                                log::warn!("client websocket closed");
+                            },
+                            Some(Ok(tungstenite::Message::Close(_))) => {
+                                log::warn!("client got close frame");
+                                outgoing_messages_rx.close();
+                            },
+                            Some(Ok(msg)) => {
+                                if let Err(e) = Socket::handle_incoming_message(
+                                    &schema,
+                                    &incoming_messages_tx,
+                                    msg,
+                                )
+                                .await
+                                {
+                                    log::warn!("failed handling incoming message: {e}");
+                                    break;
+                                }
+                            },
+                            Some(Err(e)) => {
+                                log::warn!("websocket receive failed: {e}");
+                                break;
+                            }
+                        }
+                    },
+                    msg = outgoing_messages_rx.recv() => {
+                        match msg {
+                            None => {
+                                //_ = websocket.close(None).await;
+                                log::warn!("websocket closed2");
+                                break;
+                            }
+                            Some(msg) => {
+                                let msg = Socket::handle_outgoing_message(&schema, msg);
+                                match msg {
+                                    Ok(msg) => {
+                                        if let Err(e) = websocket.send(tungstenite::Message::Text(msg)).await {
+                                            log::warn!("failed to send message to socket: {e}")
+                                        }
+                                    }
+                                    Err(e) => log::warn!("failed to send message to socket: {e}"),
+                                }
+                            }
+                        }
+                    },
+                    x = shutdown_watch.changed() => {
+                        log::warn!("shuthown watch: {x:?}");
+                        // gracefully shutdown, wait for all messages to be read on out channel
+                        // before closing the websocket
+                        //outgoing_messages_rx.close();
+                    }
+                }
+            }
+
+            log::warn!("socket closed");
+        }
+    });
+
+    Socket {
+        outgoing_message_tx,
+        incoming_message_rx: tokio::sync::Mutex::new(incoming_message_rx),
+        shutdown,
+    }*/

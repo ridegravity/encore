@@ -6,6 +6,7 @@ use crate::threadsafe_function::{
 };
 use axum::response::IntoResponse;
 use encore_runtime_core::api::websocket::StreamMessagePayload;
+use encore_runtime_core::api::websocket_client;
 use encore_runtime_core::api::{self, schema, APIResult, HandlerRequest};
 use napi::{Env, JsFunction, NapiRaw};
 use napi_derive::napi;
@@ -142,6 +143,44 @@ impl Stream {
             .recv()
             .await
             .ok_or_else(|| napi::Error::new(napi::Status::Unknown, "socket receive channel closed"))
+    }
+}
+
+#[napi]
+pub struct WebSocketClient {
+    inner: websocket_client::WebSocketClient,
+}
+
+#[napi]
+impl WebSocketClient {
+    pub fn new(inner: websocket_client::WebSocketClient) -> Self {
+        WebSocketClient { inner }
+    }
+
+    #[napi]
+    #[allow(dead_code)]
+    pub fn send(&self, msg: serde_json::Map<String, serde_json::Value>) -> napi::Result<()> {
+        let msg =
+            serde_json::to_string(&msg).map_err(|e| napi::Error::new(napi::Status::Unknown, e))?;
+
+        self.inner.send(msg);
+        Ok(())
+    }
+
+    #[napi]
+    #[allow(dead_code)]
+    pub async fn recv(&self) -> napi::Result<serde_json::Map<String, serde_json::Value>> {
+        let msg = self.inner.recv().await.ok_or_else(|| {
+            napi::Error::new(napi::Status::Unknown, "socket receive channel closed")
+        })?;
+
+        Ok(serde_json::from_str(&msg).unwrap())
+    }
+
+    #[napi]
+    #[allow(dead_code)]
+    pub fn close(&self) {
+        self.inner.close()
     }
 }
 
