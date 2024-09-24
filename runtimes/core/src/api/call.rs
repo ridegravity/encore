@@ -348,25 +348,7 @@ impl ServiceRegistry {
         self.propagate_call_meta(req.headers_mut(), endpoint, source, start_event_id)
             .map_err(api::Error::internal)?;
 
-        let client = WebSocketClient::connect(req).await;
-
-        /*
-                let (stream, _resp) = tokio_tungstenite::connect_async_with_config(
-                    req,
-                    Some(WebSocketConfig::default()),
-                    false,
-                )
-                .await
-                .map_err(|err| api::Error {
-                    code: api::ErrCode::Internal,
-                    message: "failed to create connect request".into(),
-                    internal_message: Some(format!(
-                        "failed creating connect request for endpoint {endpoint_name}: {err}"
-                    )),
-                    stack: None,
-                })?;
-        */
-        Ok(client)
+        Ok(WebSocketClient::connect(req).await)
     }
 
     fn propagate_call_meta(

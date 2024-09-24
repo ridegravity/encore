@@ -37,19 +37,20 @@ impl WebSocketClient {
         }
     }
 
-    pub fn send(&self, msg: String) {
-        if let Err(err) = self.send_channel.send(Message::Text(msg)) {
-            log::error!("failed sending to send_channel: {err}");
-        }
+    pub fn send(&self, msg: bytes::Bytes) -> anyhow::Result<()> {
+        let msg = String::from_utf8(msg.into())?;
+        self.send_channel.send(Message::Text(msg))?;
+
+        Ok(())
     }
 
-    pub async fn recv(&self) -> Option<String> {
+    pub async fn recv(&self) -> Option<bytes::Bytes> {
         loop {
             let msg = self.receive_channel.lock().await.recv().await;
 
             match msg {
-                Some(Message::Text(msg)) => return Some(msg),
-                Some(Message::Binary(b)) => return Some(String::from_utf8(b).unwrap()),
+                Some(Message::Text(msg)) => return Some(msg.into()),
+                Some(Message::Binary(vec)) => return Some(vec.into()),
                 Some(msg) => {
                     log::trace!("unhandled message: {msg:?}");
                 }

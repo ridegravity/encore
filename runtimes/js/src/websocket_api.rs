@@ -161,9 +161,12 @@ impl WebSocketClient {
     #[allow(dead_code)]
     pub fn send(&self, msg: serde_json::Map<String, serde_json::Value>) -> napi::Result<()> {
         let msg =
-            serde_json::to_string(&msg).map_err(|e| napi::Error::new(napi::Status::Unknown, e))?;
+            serde_json::to_vec(&msg).map_err(|e| napi::Error::new(napi::Status::Unknown, e))?;
 
-        self.inner.send(msg);
+        self.inner
+            .send(msg.into())
+            .map_err(|e| napi::Error::new(napi::Status::Unknown, e))?;
+
         Ok(())
     }
 
@@ -177,7 +180,7 @@ impl WebSocketClient {
             )
         })?;
 
-        Ok(serde_json::from_str(&msg).unwrap())
+        Ok(serde_json::from_slice(&msg).unwrap())
     }
 
     #[napi]
