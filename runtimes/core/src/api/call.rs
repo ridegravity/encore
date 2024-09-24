@@ -280,6 +280,7 @@ impl ServiceRegistry {
             });
         };
 
+        // TODO(fredr): might be none, if no handshake schema is specified
         let Some(req_schema) = &endpoint.handshake else {
             return Err(api::Error {
                 code: api::ErrCode::NotFound,
@@ -323,7 +324,11 @@ impl ServiceRegistry {
         self.propagate_call_meta(req.headers_mut(), endpoint, source, start_event_id)
             .map_err(api::Error::internal)?;
 
-        Ok(WebSocketClient::connect(req).await)
+        let incoming = endpoint.response.clone();
+        let outgoing = endpoint.request[0].clone();
+        let schema = schema::Stream::new(incoming, outgoing);
+
+        Ok(WebSocketClient::connect(req, schema).await)
     }
 
     fn propagate_call_meta(

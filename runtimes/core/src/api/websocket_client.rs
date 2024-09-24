@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures::sink::SinkExt;
 use futures::stream::SplitSink;
 use futures::stream::SplitStream;
@@ -10,14 +12,18 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
+use super::schema;
+use super::APIResult;
+
 pub struct WebSocketClient {
     send_channel: UnboundedSender<Message>,
     receive_channel: Mutex<UnboundedReceiver<Message>>,
     shutdown: watch::Sender<bool>,
+    schema: Arc<schema::Stream>,
 }
 
 impl WebSocketClient {
-    pub async fn connect(request: http::Request<()>) -> WebSocketClient {
+    pub async fn connect(request: http::Request<()>, schema: schema::Stream) -> WebSocketClient {
         let (connection, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
 
         let (ws_write, ws_read) = connection.split();
@@ -34,28 +40,33 @@ impl WebSocketClient {
             send_channel: send_channel_tx,
             receive_channel: Mutex::new(receive_channel_rx),
             shutdown,
+            schema: schema.into(),
         }
     }
 
-    pub fn send(&self, msg: bytes::Bytes) -> anyhow::Result<()> {
-        let msg = String::from_utf8(msg.into())?;
-        self.send_channel.send(Message::Text(msg))?;
+    pub fn send(&self, msg: serde_json::Map<String, serde_json::Value>) -> APIResult<()> {
+        let msg = self.schema.to_outgoing_message(msg)?;
+
+        let msg = String::from_utf8(msg).map_err(super::Error::internal)?;
+        self.send_channel
+            .send(Message::Text(msg))
+            .map_err(super::Error::internal)?;
 
         Ok(())
     }
 
-    pub async fn recv(&self) -> Option<bytes::Bytes> {
+    pub async fn recv(&self) -> Option<APIResult<serde_json::Map<String, serde_json::Value>>> {
         loop {
             let msg = self.receive_channel.lock().await.recv().await;
 
-            match msg {
-                Some(Message::Text(msg)) => return Some(msg.into()),
-                Some(Message::Binary(vec)) => return Some(vec.into()),
-                Some(msg) => {
-                    log::trace!("unhandled message: {msg:?}");
-                }
+            let bytes: bytes::Bytes = match msg {
+                Some(Message::Text(msg)) => msg.into(),
+                Some(Message::Binary(vec)) => vec.into(),
+                Some(_msg) => continue,
                 None => return None,
             };
+
+            return Some(self.schema.parse_incoming_message(&bytes).await);
         }
     }
 

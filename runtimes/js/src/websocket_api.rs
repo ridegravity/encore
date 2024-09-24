@@ -160,11 +160,8 @@ impl WebSocketClient {
     #[napi]
     #[allow(dead_code)]
     pub fn send(&self, msg: serde_json::Map<String, serde_json::Value>) -> napi::Result<()> {
-        let msg =
-            serde_json::to_vec(&msg).map_err(|e| napi::Error::new(napi::Status::Unknown, e))?;
-
         self.inner
-            .send(msg.into())
+            .send(msg)
             .map_err(|e| napi::Error::new(napi::Status::Unknown, e))?;
 
         Ok(())
@@ -173,14 +170,22 @@ impl WebSocketClient {
     #[napi]
     #[allow(dead_code)]
     pub async fn recv(&self) -> napi::Result<serde_json::Map<String, serde_json::Value>> {
-        let msg = self.inner.recv().await.ok_or_else(|| {
-            napi::Error::new(
-                napi::Status::Unknown,
-                "websocket client receive channel closed",
-            )
-        })?;
-
-        Ok(serde_json::from_slice(&msg).unwrap())
+        self.inner
+            .recv()
+            .await
+            .ok_or_else(|| {
+                napi::Error::new(
+                    napi::Status::Unknown,
+                    "websocket client receive channel closed",
+                )
+            })?
+            .map_err(|e| {
+                log::warn!("unable to parse incoming message: {e}");
+                napi::Error::new(
+                    napi::Status::GenericFailure,
+                    "unable to parse incoming message according to schema",
+                )
+            })
     }
 
     #[napi]
