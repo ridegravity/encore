@@ -159,32 +159,7 @@ impl ServiceRegistry {
                 .rpc_call_end(&call, start_event_id, result.as_ref().err());
         }
 
-        let client = result?;
-
-        let Some(_endpoint) = self.endpoints.get(endpoint_name) else {
-            return Err(api::Error {
-                code: api::ErrCode::NotFound,
-                message: "endpoint not found".into(),
-                internal_message: Some(format!(
-                    "endpoint {} not found in application metadata",
-                    endpoint_name
-                )),
-                stack: None,
-            });
-        };
-
-        /*
-        let req_schema = endpoint.request[0].clone();
-        let resp_schema = endpoint.response.clone();
-
-        let socket = super::websocket::Socket::new_tungstenite(
-            client,
-            resp_schema.to_stream_message(),
-            req_schema.to_stream_message(),
-        );
-
-        Ok(socket)*/
-        Ok(client)
+        result
     }
 
     async fn do_api_call(
