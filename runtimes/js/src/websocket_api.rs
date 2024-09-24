@@ -171,7 +171,10 @@ impl WebSocketClient {
     #[allow(dead_code)]
     pub async fn recv(&self) -> napi::Result<serde_json::Map<String, serde_json::Value>> {
         let msg = self.inner.recv().await.ok_or_else(|| {
-            napi::Error::new(napi::Status::Unknown, "socket receive channel closed")
+            napi::Error::new(
+                napi::Status::Unknown,
+                "websocket client receive channel closed",
+            )
         })?;
 
         Ok(serde_json::from_str(&msg).unwrap())

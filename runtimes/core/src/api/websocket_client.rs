@@ -5,6 +5,7 @@ use futures::stream::StreamExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
@@ -12,23 +13,27 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 pub struct WebSocketClient {
     send_channel: UnboundedSender<Message>,
     receive_channel: Mutex<UnboundedReceiver<Message>>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl WebSocketClient {
     pub async fn connect(request: http::Request<()>) -> WebSocketClient {
         let (connection, _resp) = tokio_tungstenite::connect_async(request).await.unwrap();
 
-        let (write, read) = connection.split();
+        let (ws_write, ws_read) = connection.split();
 
         let (send_channel_tx, send_channel_rx) = tokio::sync::mpsc::unbounded_channel();
         let (receive_channel_tx, receive_channel_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        tokio::spawn(send_to_ws(send_channel_rx, write));
-        tokio::spawn(ws_to_receive(read, receive_channel_tx));
+        let (shutdown, shutdown_watch) = watch::channel(false);
+
+        tokio::spawn(send_to_ws(send_channel_rx, ws_write, shutdown_watch));
+        tokio::spawn(ws_to_receive(ws_read, receive_channel_tx));
 
         WebSocketClient {
             send_channel: send_channel_tx,
             receive_channel: Mutex::new(receive_channel_rx),
+            shutdown,
         }
     }
 
@@ -44,8 +49,9 @@ impl WebSocketClient {
 
             match msg {
                 Some(Message::Text(msg)) => return Some(msg),
+                Some(Message::Binary(b)) => return Some(String::from_utf8(b).unwrap()),
                 Some(msg) => {
-                    log::warn!("unhandled message: {msg:?}");
+                    log::trace!("unhandled message: {msg:?}");
                 }
                 None => return None,
             };
@@ -53,24 +59,38 @@ impl WebSocketClient {
     }
 
     pub fn close(&self) {
-        // TODO implement close
+        if let Err(err) = self.shutdown.send(true) {
+            log::debug!("error sending shutdown signal: {err}");
+        }
     }
 }
 
 async fn send_to_ws(
     mut rx: UnboundedReceiver<Message>,
     mut ws: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
-        let msg = rx.recv().await;
+        tokio::select! {
+            _ = shutdown.changed() => {
+                rx.close()
+            },
+            msg = rx.recv() => {
+                if let Some(msg) = msg {
+                    if let Err(err) = ws.send(msg).await {
+                        log::debug!("failed sending over websocket: {err}");
+                    }
+                } else {
+                    log::debug!("receive channel closed, shutting down");
 
-        if let Some(msg) = msg {
-            if let Err(err) = ws.send(msg).await {
-                log::error!("failed sending over websocket: {err}");
+                    if let Err(err) = ws.close().await {
+                        log::debug!("closing websocket failed: {err}");
+                    }
+
+                    break;
+                }
             }
-        } else {
-            log::warn!("receive channel closed, shutting down");
-            break;
+
         }
     }
 }
@@ -85,14 +105,14 @@ async fn ws_to_receive(
         match msg {
             Some(Ok(msg)) => {
                 if let Err(err) = tx.send(msg) {
-                    log::error!("failed sending to receive channel: {err}");
+                    log::debug!("failed sending to receive channel: {err}");
                 }
             }
             Some(Err(err)) => {
-                log::warn!("received an error from websocket: {err}");
+                log::debug!("received an error from websocket: {err}");
             }
             None => {
-                log::warn!("websocket closed, shutting down");
+                log::debug!("websocket closed, shutting down");
                 break;
             }
         }
