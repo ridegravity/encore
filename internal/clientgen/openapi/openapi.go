@@ -61,7 +61,7 @@ func (g *Generator) Generate(p clientgentypes.GenerateParams) (err error) {
 
 	for _, svc := range p.Meta.Svcs {
 		if p.Services.Has(svc.Name) {
-			if err := g.addService(svc); err != nil {
+			if err := g.addService(svc, p.Options); err != nil {
 				return err
 			}
 		}
@@ -76,21 +76,21 @@ func (g *Generator) Generate(p clientgentypes.GenerateParams) (err error) {
 	return json.Indent(p.Buf, out, "", "  ")
 }
 
-func (g *Generator) addService(svc *meta.Service) error {
+func (g *Generator) addService(svc *meta.Service, opts clientgentypes.Options) error {
 	for _, rpc := range svc.Rpcs {
 		// streaming endpoints not supported yet
 		if rpc.StreamingRequest || rpc.StreamingResponse {
 			continue
 		}
 
-		if err := g.addRPC(rpc); err != nil {
+		if err := g.addRPC(rpc, opts); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (g *Generator) addRPC(rpc *meta.RPC) error {
+func (g *Generator) addRPC(rpc *meta.RPC, opts clientgentypes.Options) error {
 	item := g.getOrCreatePath(rpc)
 
 	encodings, err := encoding.DescribeRPC(g.md, rpc, &encoding.Options{})
@@ -100,7 +100,7 @@ func (g *Generator) addRPC(rpc *meta.RPC) error {
 
 	for _, reqEnc := range encodings.RequestEncoding {
 		for _, m := range reqEnc.HTTPMethods {
-			op, err := g.newOperationForEncoding(rpc, m, reqEnc, encodings.ResponseEncoding)
+			op, err := g.newOperationForEncoding(rpc, m, reqEnc, encodings.ResponseEncoding, opts)
 			if err != nil {
 				return errors.Wrapf(err, "create operation for rpc %s.%s", rpc.ServiceName, rpc.Name)
 			}
@@ -122,15 +122,25 @@ func (g *Generator) getOrCreatePath(rpc *meta.RPC) *openapi3.PathItem {
 	return item
 }
 
-func (g *Generator) newOperationForEncoding(rpc *meta.RPC, method string, reqEnc *encoding.RequestEncoding, respEnc *encoding.ResponseEncoding) (*openapi3.Operation, error) {
+func (g *Generator) newOperationForEncoding(
+	rpc *meta.RPC,
+	method string,
+	reqEnc *encoding.RequestEncoding,
+	respEnc *encoding.ResponseEncoding,
+	opts clientgentypes.Options,
+) (*openapi3.Operation, error) {
 	summary, desc := "", ""
 	if rpc.Doc != nil {
 		summary, desc = splitDoc(*rpc.Doc)
 	}
+	opID := method + ":" + rpc.ServiceName + "." + rpc.Name
+	if opts.OpenAPIExcludeMethodFromOperationID {
+		opID = rpc.ServiceName + "." + rpc.Name
+	}
 	op := &openapi3.Operation{
 		Summary:     summary,
 		Description: desc,
-		OperationID: method + ":" + rpc.ServiceName + "." + rpc.Name,
+		OperationID: opID,
 		Responses:   make(openapi3.Responses),
 	}
 

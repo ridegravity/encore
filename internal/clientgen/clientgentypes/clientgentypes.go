@@ -12,6 +12,7 @@ type GenerateParams struct {
 	AppSlug  string
 	Meta     *meta.Data
 	Services ServiceSet
+	Options  Options
 }
 
 type ServiceSet struct {
@@ -62,4 +63,8 @@ func NewServiceSet(md *meta.Data, include, exclude []string) ServiceSet {
 
 func AllServices(md *meta.Data) ServiceSet {
 	return NewServiceSet(md, []string{"*"}, nil)
+}
+
+type Options struct {
+	OpenAPIExcludeMethodFromOperationID bool
 }

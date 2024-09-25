@@ -139,8 +139,14 @@ func (s *Server) GenClient(ctx context.Context, params *daemonpb.GenClientReques
 
 	lang := clientgen.Lang(params.Lang)
 
+	opts := clientgentypes.Options{}
+	if lang == clientgen.LangOpenAPI && params.OpenapiOptions != nil &&
+		params.OpenapiOptions.ExcludeMethodFromOperationId != nil {
+		opts.OpenAPIExcludeMethodFromOperationID = *params.OpenapiOptions.ExcludeMethodFromOperationId
+	}
+
 	servicesToGenerate := clientgentypes.NewServiceSet(md, params.Services, params.ExcludedServices)
-	code, err := clientgen.Client(lang, params.AppId, md, servicesToGenerate)
+	code, err := clientgen.Client(lang, params.AppId, md, servicesToGenerate, opts)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

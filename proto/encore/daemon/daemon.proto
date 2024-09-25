@@ -277,6 +277,14 @@ message GenClientRequest {
   // Services to exclude from the output.
   // Takes precedence over 'services' above.
   repeated string excluded_services = 6;
+
+  // Options specific to generating the OpenAPI spec.
+  optional OpenApiOptions openapi_options = 7;
+}
+
+message OpenApiOptions {
+  // Exclude the HTTP method from the OperationID in the spec.
+  optional bool exclude_method_from_operation_id = 1;
 }
 
 message GenClientResponse {
